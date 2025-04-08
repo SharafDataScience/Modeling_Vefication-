@@ -1,0 +1,280 @@
+
+-- Needham-Schroeder Protocol (NSP)
+
+
+-- Preliminaries
+-- =============
+
+
+-- Recall the NSP
+-- 1. A -> B : {N_A,A}_pkB
+-- 2. B -> A : {N_A,N_B}_pkA
+-- 3. A -> B : {N_B}_pkB
+
+
+-- Users, nonces, messages
+
+datatype User = A | B | I
+
+datatype Nonce = N.User.User 
+-- For example, N.A.B is the nonce created by Alice intended for Bob.
+
+Message = 
+  { i.ns.us.v |               -- step number i . nonces ns . user names us . v's private key 
+      i  <- {1,2,3}, 
+      ns <- union({<n> | n <- Nonce}, {<n,m> | n <- Nonce, m <- Nonce}),
+      us <- union({<>}, {<u> | u <- User}),
+      v  <- User }
+
+
+-- The nonces in a message
+
+nonces(_.ns._._) = ns
+
+-- The user whose public key was used to encode the plain text.
+
+pk(_._._.v) = v
+
+
+-- Reducing redundancy
+-- All relevant nonces:
+
+RelNonce = { N.u.v | u <- User, v <- diff(User,{u}) }
+
+-- All relevant messages:
+
+RelMessage = 
+  Union( { { 1.<n>.<u>.v | n <- RelNonce, u <- User, v <- User },
+           { 2.<n,m>.<>.u | n <- RelNonce, m <- RelNonce, u <- User },
+           { 3.<m>.<>.v | m <- RelNonce, v <- User } } )
+
+
+-- Channels and the environment
+
+channel send, receive : Message
+
+ENV = [] msg : RelMessage @ 
+      send . msg -> 
+      receive . msg -> 
+      ENV
+
+-- Equivalently:
+-- ENV = send ? msg -> receive . msg -> ENV
+
+
+-- Modelling honest users
+-- ======================
+
+
+-- UA(u) ("User Active"): Honest user u who plays the role of the initiator.
+
+-- UP(u) ("User Passive"): Honest user u who plays the role of the responder.
+
+
+UA(u) = [] v : diff(User,{u}) @ 
+        let n = N.u.v within  
+        send.1.<n>.<u>.v     ->
+        [] m : diff(RelNonce,{n}) @ 
+        receive.2.<n,m>.<>.u ->
+        send.3.<m>.<>.v -> 
+        STOP
+
+          
+UP(v) = [] u : diff(User,{v}), n : RelNonce @
+        receive.1.<n>.<u>.v ->
+        let m = N.v.u within  
+        send.2.<n,m>.<>.u ->
+        receive.3.<m>.<>.v ->
+        STOP
+
+
+-- Process U(u) is a user who has the choice to play 
+-- the active or the passive part in the NSP
+
+U(u) = UA(u) [] UP(u)
+
+
+-- All users running in parallel without direct communication,
+-- assuming that all users behave honestly, including user I.
+ 
+USERS = ||| u : User @ U(u)
+
+
+-- Modelling and analysing NSP with honest users only
+-- ==================================================
+
+
+-- Model the process system of all users interacting with the environment
+-- via the channels send and receive. This is the model of NSP.
+
+-- Note: still assuming that all users behave honestly, including user I.
+
+System = USERS [| {| send, receive |} |] ENV
+
+-- The sets of nonces generated respectively intended for user u:
+
+noncesFrom(u) = Union({ {N.u.v} | v <- diff(User,{u}) })
+noncesFor(u) = Union({ {N.v.u} | v <- diff(User,{u}) })
+
+-- The set of nonces user u is allowed to know:
+
+noncesAllowed(u) = union(noncesFrom(u), noncesFor(u))
+
+-- A boolean function that tests whether all nonces in a list of nonces 
+-- are allowed to be known by a user:
+
+allAllowed(ns,u) = 
+    if ns == <> 
+    then true
+    else member(head(ns),noncesAllowed(u)) and allAllowed(tail(ns),u)
+
+-- Given a set S of user, ALLOWED(S) computes the set of all messages msg such that
+-- no user in S can see a nonce in msg that they are not supposed to see.
+-- In other words: Whenever a user u in S can see a nonce in msg, 
+-- u is allowed to see that nonce.
+
+ALLOWED(S) = 
+  { msg | msg <- RelMessage, 
+          not(member(pk(msg),S)) or allAllowed(nonces(msg),pk(msg)) }
+
+-- Defining specification process SECRECY(S) which can perform exactly
+-- the actions of the form receive.msg, where msg is a message in ALLOWED(S).
+
+SECRECY(S) = receive ? msg : ALLOWED(S) -> SECRECY(S)
+
+-- Check that System is safe for honest users. That is, when running System, 
+-- no user can get hold of a nonce they are not supposed to know.
+
+assert SECRECY(User) [T= System \ {| send |}
+
+-- The intended runs of NSP are modelled by the process System,
+-- that is, occur as traces of System.
+
+-- The intended run of initiator u and responder v:
+
+IntendedRun(u,v) =
+   let n = N.u.v within
+   let m = N.v.u within
+   send.1.<n>.<u>.v ->
+   receive.1.<n>.<u>.v ->
+   send.2.<n,m>.<>.u ->
+   receive.2.<n,m>.<>.u ->
+   send.3.<m>.<>.v ->
+   receive.3.<m>.<>.v ->
+   STOP
+
+assert System [T= IntendedRun(A,B)
+
+-- Check whether System is deadlock free.
+
+assert System :[deadlock free]
+
+-- Users and environment can be given the possibility to restart at any stage.
+-- For example
+-- ENV = send ? msg : RelMessage -> (receive . msg -> ENV [] ENV)
+
+
+-- Modelling and analysing NSP with intruder
+-- =========================================
+
+
+-- The sequence of nonces the intruder can read off from a message: 
+
+learnI(msg) = if pk(msg) == I then nonces(msg) else <>
+
+-- The set of nonces the intruder can learn from a set of messages, 
+-- or generate by himself:
+
+genNoncesI(Msg) = union(Union({set(learnI(msg)) | msg <- Msg}), noncesFrom(I))
+
+-- The set of unsuspected messages generated from a set of nonces:
+
+unsuspected(Ns) = 
+ Union(
+        {
+         {1.<n>.<u>.v | v <- User, n <- Ns, u <- diff(User,{v}) },
+         {2.<n,m>.<>.u | u <- User, 
+                         n <- { N.u.v | v <- diff(User,{u}) }, 
+                         member(n,Ns),  
+                         m <- diff(Ns,{n}) }, 
+         {3.<n>.<>.v | v <- User, 
+                       n <- { N.v.u | u <- diff(User,{v}) }, 
+                       member(n,Ns)} 
+        }
+      )
+
+-- The set of messages the intruder can generate from the messages in Msg, 
+-- or generate by himself:
+
+genMessagesI(Msg) = union(Msg,unsuspected(genNoncesI(Msg)))
+
+-- Modelling the intruder:
+
+Intruder = [] msg : RelMessage @
+           receive.msg ->
+           [] msg' : genMessagesI({msg}) @
+           send.msg' ->
+           Intruder
+
+-- Let user I behave as an intruder 
+
+UI(u) = if u != I then U(u) else Intruder
+
+
+-- Let the users and the intruder run in parallel, 
+-- without direct communication:
+
+USERSI = ||| u : User @ UI(u)
+
+
+-- Analogue to System, but now with the intruder:
+
+SystemI = USERSI [| {| send, receive |} |] ENV
+
+
+-- Check whether NSP is safe, that is,
+-- whether intruder can learn a secret nonce.
+-- This should fail as NSP is fails to hide the nonce from intruder
+
+assert SECRECY({I}) [T= SystemI \ {| send |}
+
+
+-- Modelling and analysing NSLP with intruder
+-- ==========================================
+-- Needham-Schroeder-Lowe Protocol (NSLP)
+
+
+RelMessageL = 
+  Union(  
+          { 
+            { 1.<n>.<u>.v | n <- RelNonce, u <- User, v <- User },
+            { 2.<n,m>.<v>.u | n <- RelNonce, m <- RelNonce, u <- User, v <- User },
+            { 3.<m>.<>.v | m <- RelNonce, v <- User }  
+          } 
+        )
+
+UAL(u) = [] v : diff(User,{u}) @ 
+         let n = N.u.v within  
+         send.1.<n>.<u>.v      ->
+         [] m : diff(RelNonce,{n}) @ 
+         receive.2.<n,m>.<v>.u ->
+         send.3.<m>.<>.v       -> 
+         UAL(u)
+
+UPL(v) = [] u : diff(User,{v}), n : RelNonce @
+        receive.1.<n>.<u>.v ->
+        let m = N.v.u within  
+        send.2.<n,m>.<v>.u  ->
+        receive.3.<m>.<>.v  -> 
+        UPL(v)
+
+UL(u) = UAL(u) [] UPL(u)
+
+UIL(u) = if u != I then UL(u) else Intruder
+ 
+USERSIL = ||| u : User @ UIL(u)
+
+SystemIL = USERSIL [| {| send, receive |} |] ENV
+
+-- This should prove NSLP fixes MITM attack on NSP.
+assert SECRECY({I}) [T= SystemIL \ {| send |}

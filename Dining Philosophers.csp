@@ -1,0 +1,151 @@
+
+-- The Dining Philosophers’ Problem
+
+
+-- Preliminaries
+-- =============
+
+
+M = 5         -- Number of Philosophers and forks
+I = {0..M-1}  -- Names of philosophers and forks
+
+right(n) = (n+1)%M   -- Moving one step to the right (counterclockwise)
+
+first_fork(n) = n         -- philosopher n's first fork is the one to her left
+second_fork(n) = right(n) -- philosopher n's second fork is the one to her right
+
+
+-- Thinking and eating
+
+channel think, sit, eat, getup : I
+
+-- Lifting fork up and putting it down.
+
+channel up, down: I.I
+
+-- Modelling and analysing the dining philosophers
+
+P(n)  = think.n ->
+        sit.n ->
+        up.n.first_fork(n)  ->
+        up.n.second_fork(n) ->
+        eat.n ->
+        down.n.first_fork(n) ->
+        down.n.second_fork(n) ->
+        getup.n ->       
+        P(n)
+
+
+-- Philosophers don't communicate with each other
+-- (so far, there is no restriction on the movement of forks).
+-- Hence the group of philosophers is modelled as the replicated
+-- interleaving of all the P(n):
+
+Phils = ||| n : I @ P(n)
+ 
+-- If M = 5, the definition is equivalent to:
+-- Phils = P(0) ||| P(1) ||| P(2) ||| P(3) ||| P(4) 
+
+-- Forks
+-- A fork can be picked up by anybody and then then put down by anybody.
+-- But if a fork has been picked up, the same fork can't be picked up again
+-- before it hasn't been been put down.
+-- Therefore, for each fork the up and down events must alternate.
+
+F(n) = [] m : I @ up.m.n -> [] k : I @ down.k.n -> F(n) 
+
+-- Forks don't communicate with each other.
+
+Forks = ||| n:I @ F(n)
+
+
+-- Dining Philosophers and their analysis
+-- ======================================
+
+
+-- The dining Philosophers can decide to eat at any time
+-- but they have to respect the restrictions imposed by the 
+-- process Fork(n). 
+-- Technically, this means that the philosophers and the forks 
+-- run in parallel, synchronising on the fork movements (up and down).
+
+DinPhils = Phils[|{|up,down|}|]Forks
+
+-- Check whether the philosophers may get stuck:
+
+assert DinPhils :[deadlock free] 
+
+
+-- Avoiding deadlock with the help of a butler
+-- ===========================================
+
+
+-- Since it is not realistic to assume that a philosopher 
+-- will ever change their habit, we instead employ a butler 
+-- who makes sure that not all philosophers are seated at the same time.
+
+inc(k) = if k < M then k+1 else k
+dec(k) = if k > 0 then k-1 else k
+
+-- The butler restricts the number of seated philosophers.
+-- In the definition the guard syntax is used: 
+-- If G is a boolean expression (the 'guard') and P is a process, then
+-- 'G & P' is shorthand for 'if G then P else STOP'.
+
+Butler(k) = k < M-1 & (sit?n -> Butler(inc(k))) 
+            [] 
+            getup?n -> Butler(dec(k))
+
+-- The dining philosophers, controlled by the butler:
+
+DinPhilsB = DinPhils[|{|getup,sit|}|]Butler(0)
+
+-- Check whether the philosophers with butler are deadlock free:
+
+assert DinPhilsB :[deadlock free] 
+
+
+-- Monitoring the number of eating philosophers
+-- ============================================
+
+
+-- Due to rising energy prices and staff shortage, catering
+-- can only serve half of the philosophers at the same time.
+-- Therefore, they need to make sure that at most half of 
+-- the philosophers are eating at any time.
+
+-- Philosophers finish eating when they put down their first fork:
+
+channel eating : Int
+
+Monitor(k) = 
+    eating.k -> ( 
+                  [] n : I @ eat?n -> Monitor(inc(k)) 
+                  [] 
+                  ([] n : I @ down.n.first_fork(n) -> Monitor(dec(k))) 
+                )
+
+
+-- The monitored philosophers:
+
+MonitorActs = union( {|eat|} , {down.n.first_fork(n) | n <- I } ) 
+
+DinPhilsM = DinPhils[|{|eat,down|}|]Monitor(0)
+DinPhilsBM = DinPhilsB[|{|eat,down|}|]Monitor(0)
+
+-- The Specification process saying that at most m philosophers are eating:
+
+At_most_eating(m) = eating ? k : {0..m} -> At_most_eating(m)
+
+-- Check that at most M/2 philosophers are eating at any time.
+-- Done by checking trace equivalent of implementation against specification.
+
+PhilActs = {| think, sit, up, eat, down, getup |}
+
+assert At_most_eating(M/2) [T=DinPhilsM \{| think, sit, eat, up, down, getup |}
+assert At_most_eating(M/2) [T=DinPhilsBM \{| think, sit, up, eat, down, getup |}
+
+
+-- Check that M/2 is optimal, that is, M/2-1 fails.
+assert At_most_eating(M/2-1) [T=DinPhilsM \{| think, sit, eat, up, down, getup |}
+assert At_most_eating(M/2-1) [T=DinPhilsBM \{| think, sit, up, eat, down, getup |}
